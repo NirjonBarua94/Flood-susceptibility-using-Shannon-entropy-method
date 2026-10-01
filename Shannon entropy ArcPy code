@@ -1,0 +1,104 @@
+import math
+import os
+import arcpy
+from arcpy.sa import *
+
+# 1. Setup
+arcpy.CheckOutExtension("Spatial")
+
+gdb_path = r"C:\Users\Nirjon\OneDrive\ドキュメント\ArcGIS\Packages\reclassed_948cdd\commondata\default.gdb" #input here your repository 
+arcpy.env.workspace = gdb_path
+arcpy.env.scratchWorkspace = gdb_path
+arcpy.env.overwriteOutput = True
+
+factor_rasters = [
+    "Reclass_rain",
+    "Reclass_Prox1",
+    "Reclass_MNDW1",
+    "Reclass_NDVI1",
+    "Reclass_LULC1",
+    "Reclass_twi1",
+    "Reclass_ElevFinal",
+    "Reclass_Slop1",   
+]
+
+# 2. Calculate entropy weights
+raw_weights = {}
+
+print("=== PURE SHANNON ENTROPY FACTOR WEIGHTS ===\n")
+
+for raster_name in factor_rasters:
+    raster_path = os.path.join(gdb_path, raster_name)
+
+    # Build attribute table
+    try:
+        arcpy.management.BuildRasterAttributeTable(raster_path)
+    except Exception:
+        pass
+
+    # Get pixel counts
+    n_dict = {}
+    with arcpy.da.SearchCursor(raster_path, ["Value", "Count"]) as cursor:
+        for row in cursor:
+            n_dict[row[0]] = row[1]
+
+    N_tot = sum(n_dict.values())
+    M_j = len(n_dict)
+
+    if N_tot == 0 or M_j <= 1:
+        W_j = 0.0
+    else:
+        # Calculate entropy
+        H_j = 0.0
+        for count in n_dict.values():
+            p_i = count / N_tot
+
+            if p_i > 0:
+                H_j -= p_i * math.log2(p_i)
+
+        # Calculate entropy weight
+        H_max = math.log2(M_j)
+        W_j = (H_max - H_j) / H_max if H_max > 0 else 0.0
+
+    raw_weights[raster_name] = W_j
+    print(f"Factor: {raster_name} | Raw Weight: {round(W_j, 6)}")
+
+# 3. Normalize weights
+sum_raw_weights = sum(raw_weights.values())
+norm_weights = {}
+
+print("\n=== NORMALIZED FACTOR WEIGHTS ===")
+
+for raster_name, w_j in raw_weights.items():
+    w_norm = (
+        (w_j / sum_raw_weights)
+        if sum_raw_weights > 0
+        else (1.0 / len(factor_rasters))
+    )
+
+    norm_weights[raster_name] = w_norm
+    print(f"Factor: {raster_name} -> Weight: {round(w_norm, 6)}")
+
+# 4. Apply weights
+weighted_rasters = []
+
+for raster_name in factor_rasters:
+    raster_path = os.path.join(gdb_path, raster_name)
+    w_norm = norm_weights[raster_name]
+
+    r_obj = Raster(raster_path)
+    weighted_r = r_obj * w_norm
+    weighted_rasters.append(weighted_r)
+
+# 5. Create final Shannon Entropy map
+print("\n=== Creating Final Shannon Entropy Map ===")
+final_se_map = weighted_rasters[0]
+for r in weighted_rasters[1:]:
+    final_se_map = final_se_map + r
+
+output_raster_name = "Flood_susceptibility_Map" #change this raster name as you want
+final_se_path = os.path.join(gdb_path, output_raster_name)
+
+final_se_map.save(final_se_path)
+
+print(f"\nSUCCESS! '{output_raster_name}' map successfully created!")
